@@ -1,1 +1,2 @@
 .conda
+.streamlit/secrets.toml
