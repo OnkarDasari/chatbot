@@ -3,54 +3,72 @@ from typing import Generator
 from groq import Groq
 from supabase import create_client, Client
 import urllib.parse
-
+import uuid
+import atexit
 
 # Your Supabase keys (you can load from st.secrets too)
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-redirect_uri = "https://groqchatonkar.streamlit.app/"
+redirect_uri = "https://groqchatonkar.streamlit.app"
 
 # Auth state
 if "user" not in st.session_state:
     st.session_state.user = None
+if "is_guest" not in st.session_state:
+    st.session_state.is_guest = False
 
-# Show login if not logged in
-if not st.session_state.user:
-    st.title("Login")
+# Show login options if not logged in
+if not st.session_state.user and not st.session_state.is_guest:
+    st.title("🔐 Login to Groq Chat")
 
-    oauth_url = f"{SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to={urllib.parse.quote(redirect_uri)}"
-    st.markdown(f"[🟢 Sign in with Google]({oauth_url})")
+    col1, col2 = st.columns(2)
+    with col1:
+        oauth_url = f"{SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to={urllib.parse.quote(redirect_uri)}"
+        st.markdown(f"[🟢 Sign in with Google]({oauth_url})")
 
-    # After redirect, user will paste back the full URL
+    with col2:
+        if st.button("➡️ Continue as Guest"):
+            guest_id = str(uuid.uuid4())
+            st.session_state.user = {"id": guest_id, "email": "guest"}
+            st.session_state.is_guest = True
+            st.success("Using app as guest.")
+            st.rerun()
+
+    # After redirect
     auth_url = st.text_input("Paste the full redirected URL after signing in:")
-
     if auth_url:
         from urllib.parse import urlparse, parse_qs
 
         parsed = urlparse(auth_url)
         fragments = parse_qs(parsed.fragment)
-
         access_token = fragments.get("access_token", [None])[0]
 
         if access_token:
             user = supabase.auth.get_user(access_token)
             st.session_state.user = user.user
+            st.session_state.is_guest = False
             st.success("Logged in as " + st.session_state.user.email)
             st.rerun()
         else:
             st.error("Could not extract access_token.")
     st.stop()
 
-user_id = st.session_state.user.id
+user_id = st.session_state.user["id"] if isinstance(st.session_state.user, dict) else st.session_state.user.id
 
 # --- Logout and Clear History Buttons ---
 st.sidebar.title("Session Options")
 
 # Log Out
 if st.sidebar.button("🚪 Log Out"):
+    if st.session_state.is_guest:
+        supabase.table("chat_history") \
+            .delete() \
+            .eq("user_id", user_id) \
+            .execute()
     st.session_state.user = None
+    st.session_state.is_guest = False
     st.rerun()
 
 # Clear chat history for current user and model
@@ -233,3 +251,11 @@ if prompt := st.chat_input("Enter your prompt here..."):
             {"role": "assistant", "content": combined_response})
         # Log chat to Supabase
         log_chat(user_id=user_id, message=prompt, response=combined_response, model=model_option)
+
+if st.session_state.is_guest:
+    def cleanup_guest_data():
+        supabase.table("chat_history") \
+            .delete() \
+            .eq("user_id", user_id) \
+            .execute()
+    atexit.register(cleanup_guest_data)
