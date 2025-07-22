@@ -12,7 +12,7 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-redirect_uri = "https://groqchatonkar.streamlit.app/"
+redirect_uri = "http://localhost:8501/"
 
 # Auth state
 if "user" not in st.session_state:
@@ -119,7 +119,7 @@ def icon(emoji: str):
     )
 
 
-icon("")
+icon("🧠")
 
 st.subheader("Groq Chat Streamlit App", divider="rainbow", anchor=False)
 
@@ -141,7 +141,8 @@ def fetch_chat_history(user_id: str, model: str, chat_id: int):
 
 
 if "selected_model" not in st.session_state:
-    st.session_state.selected_model = None
+    st.session_state.selected_model = "Select a model"
+
 
 # Define model details
 models = {
@@ -156,12 +157,30 @@ models = {
 col1, col2, col3 = st.columns([2, 2, 2])
 
 with col1:
-    model_option = st.selectbox(
+    selected = st.selectbox(
         "Choose a model:",
-        options=list(models.keys()),
-        format_func=lambda x: models[x]["name"],
-        index=1
+        options=["Select a model"] + list(models.keys()),
+        format_func=lambda x: models[x]["name"] if x in models else x
     )
+
+if selected == "Select a model":
+    st.warning("Please select a model to continue.")
+    st.stop()
+else:
+    model_option = selected
+
+
+# Only set chat_id if it hasn't already been set
+if "chat_id" not in st.session_state or st.session_state.chat_id is None:
+    # Fetch latest chat_id for this user and model
+    existing_chats = supabase.table("chat_history").select("chat_id").match({
+        "user_id": user_id,
+        "model": model_option
+    }).order("chat_id", desc=True).limit(1).execute()
+
+    if existing_chats.data:
+        st.session_state.chat_id = existing_chats.data[0]["chat_id"]
+
 
 max_tokens_range = models[model_option]["tokens"]
 
@@ -220,10 +239,38 @@ if st.sidebar.button("➕ New Chat"):
     st.session_state.chat_id = new_chat_id
     st.session_state.messages = []
 
-# ✅ Block user if no chat has been started
+
+
+# Detect model change and clear chat history if model has changed
+if st.session_state.selected_model != model_option:
+    st.session_state.selected_model = model_option
+    st.session_state.messages = []
+    st.session_state.chat_id = None  # Reset chat ID
+
+# 🧠 Auto-load previous chat if none selected yet
 if st.session_state.chat_id is None:
-    st.warning("Please start a new chat using the ➕ New Chat button.")
-    st.stop()
+    existing_chats = supabase.table("chat_history") \
+        .select("chat_id") \
+        .eq("user_id", user_id) \
+        .eq("model", model_option) \
+        .order("timestamp", desc=True) \
+        .limit(1) \
+        .execute()
+
+    if existing_chats.data:
+        st.session_state.chat_id = existing_chats.data[0]["chat_id"]
+
+# ✅ Ensure messages are loaded for current chat_id
+if "messages" not in st.session_state or not st.session_state.messages:
+    st.session_state.messages = []
+    if st.session_state.chat_id is not None:
+        history = fetch_chat_history(user_id, model_option, st.session_state.chat_id)
+        for row in history:
+            if row["message"]:
+                st.session_state.messages.append({"role": "user", "content": row["message"]})
+            if row["response"]:
+                st.session_state.messages.append({"role": "assistant", "content": row["response"]})
+
 
 
 # 💬 Load all chats for selected model for sidebar display
@@ -256,6 +303,20 @@ for cid in chat_list:
                 st.session_state.messages.append({"role": "assistant", "content": row["response"]})
         st.rerun()
 
+# 🗑️ Delete currently selected chat
+if st.session_state.chat_id is not None:
+    if st.sidebar.button("🗑️ Delete Chat", use_container_width=True):
+        supabase.table("chat_history") \
+            .delete() \
+            .eq("user_id", user_id) \
+            .eq("model", model_option) \
+            .eq("chat_id", st.session_state.chat_id) \
+            .execute()
+
+        st.session_state.chat_id = None
+        st.session_state.messages = []
+        st.rerun()
+
 
 
 ## Initialize chat history only if chat_id is set
@@ -268,12 +329,6 @@ if "messages" not in st.session_state:
                 st.session_state.messages.append({"role": "user", "content": row["message"]})
             if row["response"]:
                 st.session_state.messages.append({"role": "assistant", "content": row["response"]})
-
-    for row in history:
-        if row["message"]:
-            st.session_state.messages.append({"role": "user", "content": row["message"]})
-        if row["response"]:
-            st.session_state.messages.append({"role": "assistant", "content": row["response"]})
 
 # ✅ Now we can render them
 for message in st.session_state.messages:
