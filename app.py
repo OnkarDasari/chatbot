@@ -56,6 +56,8 @@ if not st.session_state.user and not st.session_state.is_guest:
     st.stop()
 
 user_id = st.session_state.user["id"] if isinstance(st.session_state.user, dict) else st.session_state.user.id
+if "chat_id" not in st.session_state:
+    st.session_state.chat_id = None
 
 # --- Logout and Clear History Buttons ---
 st.sidebar.title("Session Options")
@@ -84,14 +86,13 @@ if st.sidebar.button("🧹 Clear Chat History"):
 
 # Function to log chat messages to Supabase
 def log_chat(user_id: str, message: str, response: str, model: str):
-    data = {
+    supabase.table("chat_history").insert({
         "user_id": user_id,
         "message": message,
         "response": response,
         "model": model,
-    }
-    print(st.session_state)
-    supabase.table("chat_history").insert(data).execute()
+        "chat_id": st.session_state.chat_id
+    }).execute()
 
 
 st.set_page_config(page_icon="💬", layout="wide",
@@ -114,11 +115,12 @@ client = Groq(
     api_key=st.secrets["GROQ_API_KEY"],
 )
 
-def fetch_chat_history(user_id: str, model: str):
+def fetch_chat_history(user_id: str, model: str, chat_id: int):
     response = supabase.table("chat_history") \
         .select("*") \
         .eq("user_id", user_id) \
         .eq("model", model) \
+        .eq("chat_id", chat_id) \
         .order("timestamp", desc=False) \
         .execute()
     return response.data
@@ -175,20 +177,91 @@ with col3:
 if st.session_state.selected_model != model_option:
     st.session_state.selected_model = model_option
     st.session_state.messages = []
+    st.session_state.chat_id = None  # Reset chat ID
 
-    history = fetch_chat_history(user_id, model_option)
+# Ensure chat_id is always valid
+if st.session_state.chat_id is None:
+    # Auto-create chat_id for current model
+    result = supabase.table("chat_history") \
+        .select("chat_id") \
+        .eq("user_id", user_id) \
+        .eq("model", model_option) \
+        .order("chat_id", desc=True) \
+        .limit(1) \
+        .execute()
+
+    previous_id = result.data[0]["chat_id"] if result.data else 0
+    st.session_state.chat_id = previous_id + 1
+    st.session_state.messages = []
+
+    history = fetch_chat_history(user_id, model_option, st.session_state.chat_id)
     for row in history:
         if row["message"]:
             st.session_state.messages.append({"role": "user", "content": row["message"]})
         if row["response"]:
             st.session_state.messages.append({"role": "assistant", "content": row["response"]})
 
+# 💬 Load all chats for selected model for sidebar display
+def fetch_all_chats_for_model(user_id, model):
+    result = supabase.table("chat_history") \
+        .select("chat_id") \
+        .eq("user_id", user_id) \
+        .eq("model", model) \
+        .order("chat_id") \
+        .execute()
+
+    chat_ids = sorted(set(row["chat_id"] for row in result.data))
+    return chat_ids
+
+chat_list = fetch_all_chats_for_model(user_id, st.session_state.selected_model)
+
+st.sidebar.markdown("### 💬 Your Chats")
+for cid in chat_list:
+    is_active = cid == st.session_state.chat_id
+    chat_label = f"👉 Chat {cid}" if is_active else f"Chat {cid}"
+    if st.sidebar.button(chat_label, key=f"chat_{cid}"):
+        st.session_state.chat_id = cid
+        st.session_state.messages = []
+
+        history = fetch_chat_history(user_id, st.session_state.selected_model, cid)
+        for row in history:
+            if row["message"]:
+                st.session_state.messages.append({"role": "user", "content": row["message"]})
+            if row["response"]:
+                st.session_state.messages.append({"role": "assistant", "content": row["response"]})
+        st.rerun()
 
 
-# Initialize chat history and selected model
-if "messages" not in st.session_state:
-    history = fetch_chat_history(user_id, model_option)
+if st.sidebar.button("➕ New Chat"):
+    # Fetch the highest chat_id for this user + model
+    result = supabase.table("chat_history") \
+        .select("chat_id") \
+        .eq("user_id", user_id) \
+        .eq("model", st.session_state.selected_model) \
+        .order("chat_id", desc=True) \
+        .limit(1) \
+        .execute()
+
+    previous_id = result.data[0]["chat_id"] if result.data else 0
+    new_chat_id = previous_id + 1
+
+    # Store in session
+    st.session_state.chat_id = new_chat_id
     st.session_state.messages = []
+
+    st.rerun()
+
+
+## Initialize chat history only if chat_id is set
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+    if st.session_state.chat_id is not None:
+        history = fetch_chat_history(user_id, model_option, st.session_state.chat_id)
+        for row in history:
+            if row["message"]:
+                st.session_state.messages.append({"role": "user", "content": row["message"]})
+            if row["response"]:
+                st.session_state.messages.append({"role": "assistant", "content": row["response"]})
 
     for row in history:
         if row["message"]:
@@ -209,6 +282,9 @@ def generate_chat_responses(chat_completion) -> Generator[str, None, None]:
         if chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
+if st.session_state.chat_id is None:
+    st.warning("Please start a new chat using the ➕ New Chat button.")
+    st.stop()
 
 if prompt := st.chat_input("Enter your prompt here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
