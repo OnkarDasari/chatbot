@@ -12,7 +12,7 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-redirect_uri = "http://localhost:8501/"
+redirect_uri = "https://groqchatonkar.streamlit.app/"
 
 # Auth state
 if "user" not in st.session_state:
