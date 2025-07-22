@@ -5,13 +5,14 @@ from supabase import create_client, Client
 import urllib.parse
 import uuid
 import atexit
+from datetime import datetime, timezone, timedelta
 
 # Your Supabase keys (you can load from st.secrets too)
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-redirect_uri = "https://groqchatonkar.streamlit.app"
+redirect_uri = "https://groqchatonkar.streamlit.app/"
 
 # Auth state
 if "user" not in st.session_state:
@@ -59,6 +60,15 @@ user_id = st.session_state.user["id"] if isinstance(st.session_state.user, dict)
 if "chat_id" not in st.session_state:
     st.session_state.chat_id = None
 
+cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+supabase.table("chat_history") \
+    .delete() \
+    .lte("timestamp", cutoff.isoformat()) \
+    .eq("is_guest", True) \
+    .execute()
+
+
 # --- Logout and Clear History Buttons ---
 st.sidebar.title("Session Options")
 
@@ -85,14 +95,16 @@ if st.sidebar.button("🧹 Clear Chat History"):
     st.rerun()
 
 # Function to log chat messages to Supabase
-def log_chat(user_id: str, message: str, response: str, model: str):
+def log_chat(user_id, message, response, model, chat_id=None, is_guest=False):
     supabase.table("chat_history").insert({
         "user_id": user_id,
         "message": message,
         "response": response,
         "model": model,
-        "chat_id": st.session_state.chat_id
+        "chat_id": chat_id,
+        "is_guest": is_guest
     }).execute()
+
 
 
 st.set_page_config(page_icon="💬", layout="wide",
@@ -179,9 +191,11 @@ if st.session_state.selected_model != model_option:
     st.session_state.messages = []
     st.session_state.chat_id = None  # Reset chat ID
 
-# Ensure chat_id is always valid
-if st.session_state.chat_id is None:
-    # Auto-create chat_id for current model
+st.sidebar.title("Chat History")
+
+# ➕ New Chat button (must come BEFORE chat_id check!)
+if st.sidebar.button("➕ New Chat"):
+    # Get highest existing chat_id for this user+model
     result = supabase.table("chat_history") \
         .select("chat_id") \
         .eq("user_id", user_id) \
@@ -191,15 +205,26 @@ if st.session_state.chat_id is None:
         .execute()
 
     previous_id = result.data[0]["chat_id"] if result.data else 0
-    st.session_state.chat_id = previous_id + 1
+    new_chat_id = previous_id + 1
+
+    # Insert placeholder row
+    supabase.table("chat_history").insert({
+        "user_id": user_id,
+        "model": model_option,
+        "chat_id": new_chat_id,
+        "message": None,
+        "response": None,
+        "is_guest": st.session_state.is_guest  # ✅ This is required
+    }).execute()
+
+    st.session_state.chat_id = new_chat_id
     st.session_state.messages = []
 
-    history = fetch_chat_history(user_id, model_option, st.session_state.chat_id)
-    for row in history:
-        if row["message"]:
-            st.session_state.messages.append({"role": "user", "content": row["message"]})
-        if row["response"]:
-            st.session_state.messages.append({"role": "assistant", "content": row["response"]})
+# ✅ Block user if no chat has been started
+if st.session_state.chat_id is None:
+    st.warning("Please start a new chat using the ➕ New Chat button.")
+    st.stop()
+
 
 # 💬 Load all chats for selected model for sidebar display
 def fetch_all_chats_for_model(user_id, model):
@@ -231,25 +256,6 @@ for cid in chat_list:
                 st.session_state.messages.append({"role": "assistant", "content": row["response"]})
         st.rerun()
 
-
-if st.sidebar.button("➕ New Chat"):
-    # Fetch the highest chat_id for this user + model
-    result = supabase.table("chat_history") \
-        .select("chat_id") \
-        .eq("user_id", user_id) \
-        .eq("model", st.session_state.selected_model) \
-        .order("chat_id", desc=True) \
-        .limit(1) \
-        .execute()
-
-    previous_id = result.data[0]["chat_id"] if result.data else 0
-    new_chat_id = previous_id + 1
-
-    # Store in session
-    st.session_state.chat_id = new_chat_id
-    st.session_state.messages = []
-
-    st.rerun()
 
 
 ## Initialize chat history only if chat_id is set
@@ -319,14 +325,20 @@ if prompt := st.chat_input("Enter your prompt here..."):
         st.session_state.messages.append(
             {"role": "assistant", "content": full_response})
         # Log chat to Supabase
-        log_chat(user_id=user_id, message=prompt, response=full_response, model=model_option)
+        log_chat(user_id=user_id, message=prompt, response=full_response,
+         model=model_option, chat_id=st.session_state.chat_id,
+         is_guest=st.session_state.is_guest)
+
     else:
         # Handle the case where full_response is not a string
         combined_response = "\n".join(str(item) for item in full_response)
         st.session_state.messages.append(
             {"role": "assistant", "content": combined_response})
         # Log chat to Supabase
-        log_chat(user_id=user_id, message=prompt, response=combined_response, model=model_option)
+        log_chat(user_id=user_id, message=prompt, response=combined_response,
+         model=model_option, chat_id=st.session_state.chat_id,
+         is_guest=st.session_state.is_guest)
+
 
 if st.session_state.is_guest:
     def cleanup_guest_data():
